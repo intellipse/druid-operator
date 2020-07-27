@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: druid-operator
+  namespace: druid
 spec:
   replicas: 1
   selector:
@@ -16,7 +17,7 @@ spec:
       containers:
         - name: druid-operator
           # Replace this with the built image name
-          image: REPLACE_IMAGE
+          image: gcr.io/production-205919/druid-operator:0.0.3
           command:
           - druid-operator
           imagePullPolicy: Always
@@ -31,3 +32,6 @@ spec:
                   fieldPath: metadata.name
             - name: OPERATOR_NAME
               value: "druid-operator"
+      nodeSelector:
+        cloud.google.com/gke-nodepool: analytics-pool
+

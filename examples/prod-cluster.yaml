@@ -1,0 +1,719 @@
+apiVersion: druid.apache.org/v1alpha1
+kind: Druid
+metadata:
+  name: cluster
+  namespace: druid
+spec:
+  image: apache/druid:0.18.1
+  nodeSelector:
+    cloud.google.com/gke-nodepool: analytics-pool
+  env:
+    - name: GOOGLE_APPLICATION_CREDENTIALS
+      value: /secrets/production-205919-6e69a611eb27.json
+  startScript: /druid.sh
+  securityContext:
+    fsGroup: 1000
+    runAsUser: 1000
+    runAsGroup: 1000
+  services:
+    - spec:
+        type: ClusterIP
+        clusterIP: None
+  commonConfigMountPath: "/opt/druid/conf/druid/cluster/_common"
+  jvm.options: |-
+    -server
+    -XX:+PrintFlagsFinal
+    -XX:MaxDirectMemorySize=10240g
+    -XX:+UnlockExperimentalVMOptions
+    -XX:+UseCGroupMemoryLimitForHeap
+    -Duser.timezone=UTC
+    -Dfile.encoding=UTF-8
+    -Dlog4j.debug
+    -XX:+ExitOnOutOfMemoryError
+    -XX:HeapDumpPath=/druid/data/logs
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:+UseG1GC
+    -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+    -XX:+UnlockDiagnosticVMOptions
+    -XX:+PrintSafepointStatistics
+    -XX:PrintSafepointStatisticsCount=1
+    -XX:+PrintGCDetails
+    -XX:+PrintGCDateStamps
+    -XX:+PrintGCApplicationStoppedTime
+    -XX:+PrintGCApplicationConcurrentTime
+    -XX:+UseGCLogFileRotation
+    -XX:NumberOfGCLogFiles=50
+    -XX:GCLogFileSize=50m
+    -Xloggc:/druid/data/logs/gc.log
+  common.runtime.properties: |
+    #
+    # Monitoring
+    #
+    druid.monitoring.monitors=["org.apache.druid.java.util.metrics.JvmMonitor"]
+    #druid.emitter=noop
+    druid.emitter.logging.logLevel=debug
+
+    #
+    # Extensions
+    #
+    druid.extensions.loadList=["druid-google-extensions","druid-kafka-indexing-service","druid-datasketches","postgresql-metadata-storage","druid-protobuf-extensions","druid-stats"]
+
+    # Log all runtime properties on startup. Disable to avoid logging properties on startup:
+    druid.startup.logging.logProperties=true
+    #
+    # Service discovery
+    #
+    druid.selectors.indexing.serviceName=druid/overlord
+    druid.selectors.coordinator.serviceName=druid/coordinator
+    druid.sql.enable=true
+  deepStorage:
+    spec:
+      properties: |-
+        druid.storage.type=google
+        druid.google.bucket=production-205919
+        druid.google.prefix=druid
+        druid.indexer.logs.directory=data/logs/
+    type: default
+  metadataStore:
+    spec:
+      properties: |-
+        druid.metadata.storage.type=postgresql
+        druid.metadata.storage.connector.connectURI=jdbc:postgresql://cloudsqlproxy.default.svc.cluster.local:5432/druid
+        druid.metadata.storage.connector.user=druid
+        druid.metadata.storage.connector.password=admin123
+        druid.metadata.storage.connector.createTables=true
+    type: default
+  zookeeper:
+    spec:
+      properties: |-
+        druid.zk.service.host=zookeeper-headless.zookeeper.svc.cluster.local
+        druid.zk.paths.base=/druid
+    type: default
+  nodes:
+    brokers:
+      nodeType: "broker"
+      druid.port: 8082
+      nodeConfigMountPath: "/opt/druid/conf/druid/cluster/query/broker"
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
+      replicas: 1
+      runtime.properties: |
+        druid.service=druid/broker
+        druid.plaintextPort=8082
+        # HTTP server settings
+        druid.server.http.numThreads=25
+        # HTTP client settings
+        druid.broker.http.numConnections=5
+        # Processing threads and buffers
+        druid.processing.buffer.sizeBytes=1073741824
+        druid.processing.numThreads=1
+        druid.processing.tmpDir=var/druid/processing
+        druid.broker.retryPolicy.numTries=3
+      log4j.config: |-
+        <Configuration status="WARN">
+          <Appenders>
+            <Console name="logline" target="SYSTEM_OUT">
+              <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+            </Console>
+            <Console name="msgonly" target="SYSTEM_OUT">
+              <PatternLayout pattern="%m%n"/>
+            </Console>
+          </Appenders>
+          <Loggers>
+            <Root level="info">
+              <AppenderRef ref="logline"/>
+            </Root>
+            <Logger name="org.apache.druid.java.util.emitter.core.LoggingEmitter" additivity="false" level="debug">
+              <AppenderRef ref="msgonly"/>
+            </Logger>
+          </Loggers>
+        </Configuration>
+      extra.jvm.options: |-
+        -Xmx2G
+        -Xms2G
+      volumeClaimTemplates:
+        - metadata:
+            name: data-volume
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 10Gi
+            storageClassName: standard
+      volumeMounts:
+        - mountPath: /druid/data
+          name: data-volume
+        - mountPath: /secrets
+          name: secrets
+          readOnly: true
+      volumes:
+        - name: data-volume
+          emptyDir: {}
+        - name: secrets
+          projected:
+            sources:
+              - secret:
+                  name: druid-gcloud-bucket-key
+      resources:
+        requests:
+          memory: "6G"
+          cpu: "1"
+        limits:
+          memory: "6G"
+          cpu: "1"
+      livenessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8082
+      readinessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8082
+      services:
+        - metadata:
+            name: broker-%s-service
+          spec:
+            clusterIP: None
+            ports:
+              - name: tcp-service-port
+                port: 8082
+                targetPort: 8082
+            type: ClusterIP
+      hpAutoscaler:
+        maxReplicas: 1
+        minReplicas: 1
+        scaleTargetRef:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          name: druid-cluster-brokers
+        metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              targetAverageUtilization: 60
+          - type: Resource
+            resource:
+              name: memory
+              targetAverageUtilization: 60
+
+    coordinators:
+      nodeType: "coordinator"
+      druid.port: 8081
+      nodeConfigMountPath: "/opt/druid/conf/druid/cluster/master/coordinator"
+      replicas: 1
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
+      runtime.properties: |
+        druid.service=druid/coordinator
+        druid.coordinator.startDelay=PT30S
+        druid.coordinator.period=PT30S
+        druid.coordinator.kill.on=true
+        druid.coordinator.kill.period=PT2H
+        druid.coordinator.kill.durationToRetain=PT0s
+        druid.coordinator.kill.maxSegments=5000
+      log4j.config: |-
+        <Configuration status="WARN">
+          <Appenders>
+            <Console name="logline" target="SYSTEM_OUT">
+              <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+            </Console>
+            <Console name="msgonly" target="SYSTEM_OUT">
+              <PatternLayout pattern="%m%n"/>
+            </Console>
+          </Appenders>
+          <Loggers>
+            <Root level="info">
+              <AppenderRef ref="logline"/>
+            </Root>
+            <Logger name="org.apache.druid.java.util.emitter.core.LoggingEmitter" additivity="false" level="debug">
+              <AppenderRef ref="msgonly"/>
+            </Logger>
+          </Loggers>
+        </Configuration>
+      services:
+        - metadata:
+            name: coordinator-%s-service
+          spec:
+            clusterIP: None
+            ports:
+              - name: tcp-service-port
+                port: 8081
+                targetPort: 8081
+            type: ClusterIP
+      extra.jvm.options: |-
+        -Xmx1G
+        -Xms1G
+      livenessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8081
+      readinessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8081
+      volumeClaimTemplates:
+        - metadata:
+            name: data-volume
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 10Gi
+            storageClassName: standard
+      volumeMounts:
+        - mountPath: /druid/data
+          name: data-volume
+        - mountPath: /secrets
+          name: secrets
+          readOnly: true
+      volumes:
+        - name: data-volume
+          emptyDir: {}
+        - name: secrets
+          projected:
+            sources:
+              - secret:
+                  name: druid-gcloud-bucket-key
+      resources:
+        limits:
+          cpu: "1"
+          memory: 6G
+        requests:
+          cpu: "1"
+          memory: 6G
+      hpAutoscaler:
+        maxReplicas: 1
+        minReplicas: 1
+        scaleTargetRef:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          name: druid-cluster-coordinators
+        metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              targetAverageUtilization: 60
+          - type: Resource
+            resource:
+              name: memory
+              targetAverageUtilization: 60
+
+    historicals:
+      nodeType: "historical"
+      druid.port: 8083
+      nodeConfigMountPath: "/opt/druid/conf/druid/cluster/data/historical"
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
+      replicas: 1
+      livenessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8083
+      readinessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8083
+      runtime.properties: |
+        druid.service=druid/historical
+        druid.server.http.numThreads=10
+        druid.processing.buffer.sizeBytes=1073741824
+        druid.processing.numMergeBuffers=1
+        druid.processing.numThreads=2
+        # Segment storage
+        druid.segmentCache.locations=[{\"path\":\"/druid/data/segments\",\"maxSize\":1099511627776}]
+        druid.server.maxSize=1099511627776
+      log4j.config: |-
+        <Configuration status="WARN">
+          <Appenders>
+            <Console name="logline" target="SYSTEM_OUT">
+              <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+            </Console>
+            <Console name="msgonly" target="SYSTEM_OUT">
+              <PatternLayout pattern="%m%n"/>
+            </Console>
+          </Appenders>
+          <Loggers>
+            <Root level="info">
+              <AppenderRef ref="logline"/>
+            </Root>
+            <Logger name="org.apache.druid.java.util.emitter.core.LoggingEmitter" additivity="false" level="debug">
+              <AppenderRef ref="msgonly"/>
+            </Logger>
+          </Loggers>
+        </Configuration>
+      extra.jvm.options: |-
+        -Xmx1G
+        -Xms1G
+      services:
+        - spec:
+            clusterIP: None
+            ports:
+              - name: tcp-service-port
+                port: 8083
+                targetPort: 8083
+            type: ClusterIP
+      volumeClaimTemplates:
+        - metadata:
+            name: data-volume
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 200Gi
+      volumeMounts:
+        - mountPath: /druid/data
+          name: data-volume
+        - mountPath: /secrets
+          name: secrets
+          readOnly: true
+      volumes:
+        - name: data-volume
+          emptyDir: {}
+        - name: secrets
+          projected:
+            sources:
+              - secret:
+                  name: druid-gcloud-bucket-key
+      resources:
+        limits:
+          cpu: "1"
+          memory: 8G
+        requests:
+          cpu: "1"
+          memory: 8G
+
+    middlemanagers:
+      druid.port: 8091
+      extra.jvm.options: |-
+        -Xmx4G
+        -Xms4G
+      nodeType: middleManager
+      nodeConfigMountPath: "/opt/druid/conf/druid/cluster/data/middlemanager"
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
+      ports:
+        - containerPort: 8100
+          name: peon-0-pt
+        - containerPort: 8101
+          name: peon-1-pt
+        - containerPort: 8102
+          name: peon-2-pt
+        - containerPort: 8103
+          name: peon-3-pt
+        - containerPort: 8104
+          name: peon-4-pt
+      replicas: 1
+      resources:
+        limits:
+          cpu: "1"
+          memory: 5Gi
+        requests:
+          cpu: "1"
+          memory: 5Gi
+      livenessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8091
+      readinessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8091
+      runtime.properties: |-
+        druid.service=druid/middleManager
+        druid.worker.capacity=4
+        druid.indexer.runner.javaOpts=-server -XX:MaxDirectMemorySize=10240g -Duser.timezone=UTC -Dfile.encoding=UTF-8 -Djava.io.tmpdir=/druid/data/tmp -Dlog4j.debug -XX:+UnlockDiagnosticVMOptions -XX:+PrintSafepointStatistics -XX:PrintSafepointStatisticsCount=1 -XX:+PrintGCDetails -XX:+PrintGCDateStamps -XX:+PrintGCApplicationStoppedTime -XX:+PrintGCApplicationConcurrentTime -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=50 -XX:GCLogFileSize=10m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:+UseG1GC -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager -XX:HeapDumpPath=/druid/data/logs/peon.%t.%p.hprof -Xms10G -Xmx10G
+        druid.indexer.task.baseTaskDir=/druid/data/baseTaskDir
+        druid.server.http.numThreads=10
+        druid.indexer.fork.property.druid.processing.buffer.sizeBytes=1
+        druid.indexer.fork.property.druid.processing.numMergeBuffers=1
+        druid.indexer.fork.property.druid.processing.numThreads=1
+        # Processing threads and buffers on Peons
+        druid.indexer.fork.property.druid.processing.numMergeBuffers=2
+        druid.indexer.fork.property.druid.processing.buffer.sizeBytes=100000000
+        druid.indexer.fork.property.druid.processing.numThreads=1
+      log4j.config: |-
+        <Configuration status="WARN">
+          <Appenders>
+              <Console name="logline" target="SYSTEM_OUT">
+              <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+            </Console>
+            <Console name="msgonly" target="SYSTEM_OUT">
+              <PatternLayout pattern="%m%n"/>
+            </Console>
+          </Appenders>
+          <Loggers>
+            <Root level="info">
+              <AppenderRef ref="logline"/>
+            </Root>
+            <Logger name="org.apache.druid.java.util.emitter.core.LoggingEmitter" additivity="false" level="info">
+              <AppenderRef ref="msgonly"/>
+            </Logger>
+          </Loggers>
+        </Configuration>
+      services:
+        - spec:
+            clusterIP: None
+            ports:
+              - name: tcp-service-port
+                port: 8091
+                targetPort: 8091
+              - name: peon-port-0
+                port: 8100
+                targetPort: 8100
+              - name: peon-port-1
+                port: 8101
+                targetPort: 8101
+              - name: peon-port-2
+                port: 8102
+                targetPort: 8102
+              - name: peon-port-3
+                port: 8103
+                targetPort: 8103
+              - name: peon-port-4
+                port: 8104
+                targetPort: 8104
+            type: ClusterIP
+      volumeClaimTemplates:
+        - metadata:
+            name: data-volume
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 20Gi
+      volumeMounts:
+        - mountPath: /secrets
+          name: secrets
+          readOnly: true
+        - mountPath: /druid/data
+          name: data-volume
+      volumes:
+        - name: secrets
+          projected:
+            sources:
+              - secret:
+                  name: druid-gcloud-bucket-key
+      securityContext:
+        fsGroup: 0
+        runAsGroup: 0
+        runAsUser: 0
+      hpAutoscaler:
+        maxReplicas: 1
+        minReplicas: 1
+        scaleTargetRef:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          name: druid-cluster-middlemanagers
+        metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              targetAverageUtilization: 60
+          - type: Resource
+            resource:
+              name: memory
+              targetAverageUtilization: 60
+
+    overlords:
+      druid.port: 8090
+      extra.jvm.options: |-
+        -Xmx4G
+        -Xms4G
+      nodeType: overlord
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
+      nodeConfigMountPath: "/opt/druid/conf/druid/cluster/master/overlord"
+      replicas: 1
+      resources:
+        limits:
+          cpu: "1"
+          memory: 6Gi
+        requests:
+          cpu: "1"
+          memory: 6Gi
+      runtime.properties: |-
+        druid.service=druid/overlord
+        druid.indexer.queue.startDelay=PT30S
+        druid.indexer.runner.type=remote
+        druid.indexer.storage.type=metadata
+      log4j.config: |-
+        <Configuration status="WARN">
+          <Appenders>
+            <Console name="logline" target="SYSTEM_OUT">
+              <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+            </Console>
+            <Console name="msgonly" target="SYSTEM_OUT">
+              <PatternLayout pattern="%m%n"/>
+            </Console>
+          </Appenders>
+          <Loggers>
+            <Root level="info">
+              <AppenderRef ref="logline"/>
+            </Root>
+            <Logger name="org.apache.druid.java.util.emitter.core.LoggingEmitter" additivity="false" level="debug">
+              <AppenderRef ref="msgonly"/>
+            </Logger>
+          </Loggers>
+        </Configuration>
+      livenessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8081
+      readinessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8081
+      services:
+        - metadata:
+            name: overlord-%s-service
+          spec:
+            clusterIP: None
+            ports:
+              - name: tcp-service-port
+                port: 8090
+                targetPort: 8090
+            type: ClusterIP
+      volumeClaimTemplates:
+        - metadata:
+            name: data-volume
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 10Gi
+            storageClassName: standard
+      volumeMounts:
+        - mountPath: /druid/data
+          name: data-volume
+        - mountPath: /secrets
+          name: secrets
+          readOnly: true
+      volumes:
+        - name: secrets
+          projected:
+            sources:
+              - secret:
+                  name: druid-gcloud-bucket-key
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsUser: 1000
+      hpAutoscaler:
+        maxReplicas: 1
+        minReplicas: 1
+        scaleTargetRef:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          name: druid-cluster-overlords
+        metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              targetAverageUtilization: 60
+          - type: Resource
+            resource:
+              name: memory
+              targetAverageUtilization: 60
+
+    routers:
+      livenessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8888
+      readinessProbe:
+        initialDelaySeconds: 30
+        httpGet:
+          path: /status/health
+          port: 8888
+      druid.port: 8888
+      extra.jvm.options: |-
+        -Xmx512m
+        -Xms512m
+      nodeType: router
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
+      nodeConfigMountPath: "/opt/druid/conf/druid/cluster/query/router"
+      replicas: 1
+      runtime.properties: |
+        druid.service=druid/router
+        druid.plaintextPort=8888
+        # HTTP proxy
+        druid.router.http.numConnections=50
+        druid.router.http.readTimeout=PT5M
+        druid.router.http.numMaxThreads=100
+        druid.server.http.numThreads=100
+        # Service discovery
+        druid.router.defaultBrokerServiceName=druid/broker
+        druid.router.coordinatorServiceName=druid/coordinator
+        # Management proxy to coordinator / overlord: required for unified web console.
+        druid.router.managementProxy.enabled=true
+      log4j.config: |-
+        <Configuration status="WARN">
+          <Appenders>
+            <Console name="logline" target="SYSTEM_OUT">
+              <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+            </Console>
+            <Console name="msgonly" target="SYSTEM_OUT">
+              <PatternLayout pattern="%m%n"/>
+            </Console>
+          </Appenders>
+          <Loggers>
+            <Root level="info">
+              <AppenderRef ref="logline"/>
+            </Root>
+            <Logger name="org.apache.druid.java.util.emitter.core.LoggingEmitter" additivity="false" level="debug">
+              <AppenderRef ref="msgonly"/>
+            </Logger>
+          </Loggers>
+        </Configuration>
+      services:
+        - metadata:
+            name: router-%s-service
+          spec:
+            clusterIP: None
+            ports:
+              - name: tcp-service-port
+                port: 8888
+                targetPort: 8888
+            type: ClusterIP
+      volumeClaimTemplates:
+        - metadata:
+            name: data-volume
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+      volumeMounts:
+        - mountPath: /druid/data
+          name: data-volume
+        - mountPath: /secrets
+          name: secrets
+          readOnly: true
+      volumes:
+        - name: secrets
+          projected:
+            sources:
+              - secret:
+                  name: druid-gcloud-bucket-key
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsUser: 1000

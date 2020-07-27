@@ -45,16 +45,13 @@ druid-operator$ kubectl create -f deploy/operator.yaml
 druid-operator$ kubectl describe deployment druid-operator
 ```
 
-# Deploy a druid cluster
+# Deploy Intellipse druid cluster
 
-An example spec to deploy a tiny druid cluster is included. For full details on spec please see `pkg/api/druid/v1alpha1/druid_types.go`
+An example spec to deploy the prod druid cluster is included. For full details on spec please see `pkg/api/druid/v1alpha1/druid_types.go`
 
 ```
-# deploy single node zookeeper
-druid-operator$ kubectl apply -f examples/tiny-cluster-zk.yaml
-
 # deploy druid cluster spec
-druid-operator$ kubectl apply -f examples/tiny-cluster.yaml
+druid-operator$ kubectl apply -f examples/prod-cluster.yaml
 ```
 
 # Debugging Problems
@@ -69,10 +66,10 @@ druid-operator$ kubectl get po | grep druid-operator
 druid-operator$ kubectl logs <druid-operator pod name>
 
 # check the druid spec
-druid-operator$ kubectl describe druids tiny-cluster
+druid-operator$ kubectl describe druids prod-cluster
 
 #  check if druid cluster is deployed
-druid-operator$ kubectl get svc | grep tiny
-druid-operator$ kubectl get cm | grep tiny
-druid-operator$ kubectl get sts | grep tiny
+druid-operator$ kubectl get svc | grep prod
+druid-operator$ kubectl get cm | grep prod
+druid-operator$ kubectl get sts | grep prod
 ```
